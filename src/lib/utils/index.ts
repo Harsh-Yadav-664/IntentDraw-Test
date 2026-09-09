@@ -112,16 +112,50 @@ export function extractHtml(text: string): string {
   return text
 }
 
+/**
+ * Extracts the React TSX payload from a model response.
+ *
+ * Handles the messy cases (audit: extractReact returned prose as code):
+ *  1. Fenced code block (```tsx ... ```) → the block contents.
+ *  2. Prose before the code ("Here is your site:\n\nimport React...") →
+ *     slice from the first line that starts a TSX file.
+ *  3. Trailing prose after the final closing brace of the default export
+ *     → trimmed, but only when the tail clearly isn't code.
+ */
 export function extractReact(text: string): string {
   const tsxBlockMatch = text.match(/```(?:tsx|jsx|typescript|javascript|react)?\s*([\s\S]*?)```/)
   if (tsxBlockMatch) return tsxBlockMatch[1].trim()
 
-  const trimmed = text.trim()
-  if (trimmed.startsWith('import ') || trimmed.startsWith('export ') || trimmed.startsWith('const ')) {
-    return trimmed
+  let t = text.trim()
+
+  // Prose preamble: find the first line that plausibly starts the file.
+  if (!/^(import\s|export\s|const\s|type\s|\/\/|\/\*|\s*$)/.test(t)) {
+    const m = t.match(/^(?:import\s|\/\/|\/\*|export\s|const\s|type\s)/m)
+    if (m && m.index !== undefined) {
+      t = t.slice(m.index).trim()
+    }
   }
 
-  return text
+  // Trailing prose: cut after the last `}` when the remainder contains no
+  // code punctuation (a real code tail would have braces/semicolons/parens).
+  const lastBrace = t.lastIndexOf('}')
+  if (lastBrace >= 0) {
+    const tail = t.slice(lastBrace + 1)
+    if (tail.trim() && !/[{}();=]|=>/.test(tail)) {
+      t = t.slice(0, lastBrace + 1)
+    }
+  }
+
+  return t
+}
+
+/**
+ * Parses the MIME type out of a data URL ("data:image/jpeg;base64,..." →
+ * "image/jpeg"). Falls back to image/png for bare base64 payloads.
+ */
+export function imageMimeFromDataUrl(dataUrl: string): string {
+  const m = dataUrl.match(/^data:(image\/[\w.+-]+);/)
+  return m ? m[1] : 'image/png'
 }
 
 export function getErrorMessage(error: unknown): string {

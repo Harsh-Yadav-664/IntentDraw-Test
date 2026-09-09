@@ -63,18 +63,23 @@ export async function POST(request: Request) {
     let finalPrompt = prompt.trim()
 
     // --- Intent classification (only when there is a drawing to classify) ---
-    // Text-only generation skips this entirely: no extra model call.
+    // Local heuristics resolve ~all regions with ZERO model calls (arrows,
+    // boxes, annotated/large freeforms, prompt references). The vision model
+    // is consulted only for genuinely ambiguous shapes, and per-region manual
+    // overrides from the Controls panel are respected as-is.
     if (validRegions.length > 0) {
       console.log(`[Generate] Running region intent classification for user=${userId} (${validRegions.length} regions)`)
 
       const { classifyRegionIntents } = await import('@/lib/ai/intent-classifier')
       const { tags, backgroundScopes } = await classifyRegionIntents(validRegions, finalPrompt, imageData)
 
-      validRegions = validRegions.map(r => ({
-        ...r,
-        classificationTag: tags[r.id] || 'exact-placement',
-        backgroundScope: backgroundScopes[r.id] ?? undefined,
-      }))
+      validRegions = validRegions.map(r => {
+        const tag = r.tagOverride ?? (tags[r.id] || 'exact-placement')
+        const scope = tag === 'decorative'
+          ? (r.backgroundScopeOverride ?? backgroundScopes[r.id] ?? 'region')
+          : undefined
+        return { ...r, classificationTag: tag, backgroundScope: scope }
+      })
 
       const tagsCounts = validRegions.reduce((acc, r) => {
         acc[r.classificationTag!] = (acc[r.classificationTag!] || 0) + 1
@@ -102,8 +107,12 @@ export async function POST(request: Request) {
       )
     }
 
-    // --- Generation succeeded: now consume the quota slot ---
-    await incrementUsage(userId)
+    // --- Generation succeeded: consume a quota slot (never for cache hits) ---
+    if (!result.cached) {
+      await incrementUsage(userId)
+    } else {
+      console.log(`[Generate] Cache hit — quota not consumed for user=${userId}`)
+    }
     const usage = await getUsageStats(userId)
 
     // NOTE: we intentionally do NOT run sanitizeHtml() over the generated code.
@@ -116,6 +125,7 @@ export async function POST(request: Request) {
       data: {
         code: result.code,
         provider: result.provider,
+        cached: result.cached ?? false,
         // Return usage info so UI can show remaining count
         usage: {
           remaining: usage.remaining,

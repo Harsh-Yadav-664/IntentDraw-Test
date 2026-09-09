@@ -15,7 +15,7 @@ export function useAI() {
   const [isGenerating, setIsGenerating] = useState(false)
 
   const regions = useCanvasStore((s) => s.regions)
-  const exportToPng = useCanvasStore((s) => s.exportToPng)
+  const exportDrawingImage = useCanvasStore((s) => s.exportDrawingImage)
 
   const prompt = useWorkflowStore((s) => s.prompt)
   const globalTheme = useWorkflowStore((s) => s.globalTheme)
@@ -38,8 +38,10 @@ export function useAI() {
     setStatus('generating')
 
     try {
-      // Only capture/send the canvas image when something was drawn
-      const imageData = regions.length > 0 ? exportToPng() : null
+      // Only capture/send the canvas image when something was drawn.
+      // exportDrawingImage returns a compressed JPEG (≤1024px) so vision
+      // calls stay inside free-tier token budgets.
+      const imageData = regions.length > 0 ? exportDrawingImage() : null
       const response = await fetch('/api/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -70,7 +72,7 @@ export function useAI() {
     } finally {
       setIsGenerating(false)
     }
-  }, [regions, prompt, globalTheme, aiProvider, nvidiaModelId, exportToPng, setStatus, setError, setPreviewCode])
+  }, [regions, prompt, globalTheme, aiProvider, nvidiaModelId, exportDrawingImage, setStatus, setError, setPreviewCode])
 
   /**
    * Regenerates a single region while keeping others intact.

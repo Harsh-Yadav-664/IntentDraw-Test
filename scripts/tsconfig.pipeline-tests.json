@@ -1,0 +1,34 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "outDir": "../.pipeline-test-out",
+    "rootDir": "..",
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "noEmitOnError": true,
+    "types": [
+      "node"
+    ],
+    "baseUrl": "..",
+    "paths": {
+      "@/*": [
+        "src/*"
+      ]
+    }
+  },
+  "include": [
+    "pipeline-tests.ts",
+    "../src/lib/ai/intent-heuristics.ts",
+    "../src/lib/ai/region-analyzer.ts",
+    "../src/lib/ai/component-library.ts",
+    "../src/lib/ai/design-tokens.ts",
+    "../src/lib/ai/postprocess.ts",
+    "../src/lib/ai/cache.ts",
+    "../src/lib/utils/index.ts",
+    "../src/types/index.ts"
+  ]
+}

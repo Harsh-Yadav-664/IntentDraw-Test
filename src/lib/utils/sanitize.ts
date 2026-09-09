@@ -242,9 +242,10 @@ if (typeof window.__RenderComponent !== "undefined") {
   <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-  
-  <!-- Use Lucide UMD -->
-  <script src="https://unpkg.com/lucide@latest"></script>
+
+  <!-- Lucide UMD (pinned). Exposes window.lucide with .icons (PascalCase
+       IconNode data: [["path", {...}], ...]) used to build real React SVGs. -->
+  <script src="https://unpkg.com/lucide@0.575.0/dist/umd/lucide.min.js"></script>
   ${captureScriptTag}
 
   <style>
@@ -255,22 +256,66 @@ if (typeof window.__RenderComponent !== "undefined") {
 </head>
 <body>
   <div id="root"></div>
-  <!-- Lucide React wrapper (mock) to map window.lucide primitives to React components -->
+  <!-- lucide-react shim: builds real React SVG components from the UMD
+       IconNode data. The previous proxy overwrote window.lucide and gated
+       icon rendering on an undefined global, so icons never rendered. -->
   <script>
-    window.lucide = new Proxy({}, {
-      get: function(target, prop) {
-        return function(props) {
-          // A tiny React component that renders the lucide SVG via data-lucide
+    (function () {
+      var realLucide = window.lucide;
+      var cache = {};
+
+      function toPascal(name) {
+        return String(name)
+          .replace(/^[a-z]/, function (c) { return c.toUpperCase(); })
+          .replace(/[-_\\s]+([a-z0-9])/g, function (_, c) { return c.toUpperCase(); });
+      }
+
+      function resolveIconNode(prop) {
+        if (!realLucide || !realLucide.icons) return null;
+        var name = String(prop);
+        return realLucide.icons[name] || realLucide.icons[toPascal(name)] || null;
+      }
+
+      function buildIconComponent(prop) {
+        var node = resolveIconNode(prop);
+        return function LucideIcon(props) {
           props = props || {};
-          return React.createElement('i', {
-            'data-lucide': String(prop).replace(/[A-Z]/g, m => '-' + m.toLowerCase()).replace(/^-/, ''),
-            className: props.className,
-            style: { width: props.size || 24, height: props.size || 24, color: props.color || 'currentColor', display: 'inline-block' },
-            ref: (node) => { if (node && window.lucideIcons && lucide.createIcons) lucide.createIcons({ root: node.parentNode }) }
-          });
+          if (!node) return null;
+          var size = props.size || 24;
+          return React.createElement(
+            'svg',
+            {
+              xmlns: 'http://www.w3.org/2000/svg',
+              width: size,
+              height: size,
+              viewBox: '0 0 24 24',
+              fill: props.fill || 'none',
+              stroke: props.color || 'currentColor',
+              strokeWidth: props.strokeWidth || 2,
+              strokeLinecap: 'round',
+              strokeLinejoin: 'round',
+              className: props.className || undefined,
+              style: props.style || undefined,
+              'aria-hidden': 'true'
+            },
+            node.map(function (child, i) {
+              return React.createElement(child[0], Object.assign({ key: i }, child[1]));
+            })
+          );
         };
       }
-    });
+
+      window.lucide = new Proxy({}, {
+        get: function (_target, prop) {
+          if (prop === 'createIcons' || prop === 'icons' || prop === 'createElement') {
+            return realLucide ? realLucide[prop] : undefined;
+          }
+          if (typeof prop !== 'string') return undefined;
+          if (!cache[prop]) cache[prop] = buildIconComponent(prop);
+          return cache[prop];
+        }
+      });
+    })();
   </script>
   <script type="text/javascript">${babelScript}</script>
 </body>

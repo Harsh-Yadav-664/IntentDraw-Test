@@ -1,20 +1,21 @@
 import { geminiGenerate } from './gemini'
 import { groqGenerate } from './groq'
 import { nvidiaGenerate } from './nvidia'
-import { extractReact, withTimeout } from '@/lib/utils'
+import { extractReact, withTimeout, imageMimeFromDataUrl } from '@/lib/utils'
 import type { GenerationResponse } from '@/types'
 import type { Part } from '@google/generative-ai'
 import {
   GENERATION_SYSTEM_PROMPT,
   REGENERATE_REGION_SYSTEM_PROMPT,
-  CHUNKED_SHELL_SYSTEM_PROMPT,
   CHUNKED_REGION_SYSTEM_PROMPT,
   buildGenerationUserPrompt,
   buildRegenerateUserPrompt,
-  buildShellUserPrompt,
   buildChunkUserPrompt,
 } from './prompts'
 import { resolveDesignTokens } from './design-tokens'
+import { buildShellTsx } from './region-analyzer'
+import { postProcessCode } from './postprocess'
+import { makeGenerationCacheKey, getCachedGeneration, setCachedGeneration } from './cache'
 import type { Region } from '@/types'
 
 // Per-provider hard cap for a single generation call. Above this we give up on
@@ -30,6 +31,14 @@ const PROVIDER_TIMEOUT_MS: Record<'gemini' | 'groq' | 'nvidia', number> = {
 }
 
 const DEFAULT_NVIDIA_MODEL = 'nvidia/nemotron-3.5-lightning-30b-a3b'
+
+// Above this region count we switch from one monolithic call to the chunked
+// path. Monolithic is strongly preferred: 1 call, full-page coherence, and it
+// never trips free-tier RPM limits. The chunked path is for genuinely huge
+// drawings only (audit P1.1).
+const MONOLITHIC_REGION_THRESHOLD = 15
+
+type ProviderId = 'gemini' | 'groq' | 'nvidia'
 
 /**
  * Turn a raw provider/SDK error into a short, human-readable reason. The raw
@@ -65,21 +74,29 @@ function humanizeProviderError(raw: string | undefined): string {
 
 // =============================================================================
 // Code Generation — Regions + Prompt → React TSX
-// Gemini → Groq → Nvidia fallback chain
-// Uses a single monolithic call for <= 12 regions, chunked for > 12.
-// A single call is far friendlier to free-tier rate limits than the chunked
-// path's burst of calls, so we keep the threshold generous.
+// Gemini → Groq fallback chain (NVIDIA only when explicitly selected — it is
+// slow/EOL and no longer part of the automatic chain; audit P1.4).
+// Monolithic single call for <= 15 regions; chunked (deterministic shell +
+// serial component chunks) above that. Cached results never re-run the chain.
 // =============================================================================
 
 export async function generateCode(
   regions: Region[],
   userPrompt: string,
   globalTheme?: string,
-  provider: 'gemini' | 'groq' | 'nvidia' = 'gemini',
+  provider: ProviderId = 'gemini',
   nvidiaModelId: string = DEFAULT_NVIDIA_MODEL,
   imageBase64?: string
 ): Promise<GenerationResponse> {
-  const tokens = await resolveDesignTokens(userPrompt)
+  // ── Cache: identical {regions, prompt, theme, provider} → instant reuse ──
+  const cacheKey = makeGenerationCacheKey({ regions, prompt: userPrompt, globalTheme, provider, nvidiaModelId })
+  const cached = getCachedGeneration(cacheKey)
+  if (cached) {
+    console.log(`[AI Gen] Cache hit — returning previous ${cached.provider} generation`)
+    return { success: true, code: cached.code, provider: cached.provider, cached: true }
+  }
+
+  const tokens = resolveDesignTokens(userPrompt)
 
   // Attach the drawing image whenever the user actually drew something.
   // The image is a visual reference for the character of decorative strokes;
@@ -88,12 +105,13 @@ export async function generateCode(
 
   // Strip the data URL prefix for inlineData
   const rawImageBase64 = imageBase64
-    ? imageBase64.replace(/^data:image\/\w+;base64,/, '')
+    ? imageBase64.replace(/^data:image\/[\w.+-]+;base64,/, '')
     : undefined
+  const imageMime = imageMimeFromDataUrl(imageBase64 ?? '')
 
   // Helper to run a specific provider
   // When image is available and provider is Gemini, includes inlineData for vision.
-  const runProvider = async (p: 'gemini' | 'groq' | 'nvidia', sysPrompt: string, msg: string, attachImage = false): Promise<string> => {
+  const runProvider = async (p: ProviderId, sysPrompt: string, msg: string, attachImage = false): Promise<string> => {
     const call = async (): Promise<string> => {
       if (p === 'nvidia') {
         return nvidiaGenerate(sysPrompt, msg, nvidiaModelId)
@@ -104,7 +122,7 @@ export async function generateCode(
         const contentParts: Part[] = [{ text: sysPrompt }, { text: msg }]
         if (attachImage && rawImageBase64) {
           contentParts.push({
-            inlineData: { mimeType: 'image/png', data: rawImageBase64 },
+            inlineData: { mimeType: imageMime, data: rawImageBase64 },
           })
         }
         // geminiGenerate retries free-tier 429s (honoring the server's
@@ -120,30 +138,36 @@ export async function generateCode(
     return withTimeout(call(), backstopMs, `${p} generation`)
   }
 
-  // Fallback chain based on user's selected provider
-  const fallbacks: Array<'gemini' | 'groq' | 'nvidia'> =
+  // Fallback chain based on user's selected provider.
+  // NVIDIA is legacy/explicit-select only — never an automatic fallback hop.
+  const fallbacks: ProviderId[] =
     provider === 'nvidia' ? ['nvidia', 'gemini', 'groq'] :
-    provider === 'groq' ? ['groq', 'gemini', 'nvidia'] :
-    ['gemini', 'groq', 'nvidia']
+    provider === 'groq' ? ['groq', 'gemini'] :
+    ['gemini', 'groq']
 
   // -------------------------------------------------------------------------
-  // Monolithic generation path (≤ 12 regions — single call).
+  // Monolithic generation path (≤ 15 regions — single call).
   // One call keeps us well under free-tier RPM/TPM limits; the chunked path
-  // below fires many calls at once and is what trips 429s on free tiers, so we
+  // below fires several calls and is what trips 429s on free tiers, so we
   // only fall back to it for genuinely large layouts.
   // -------------------------------------------------------------------------
-  if (regions.length <= 12) {
+  if (regions.length <= MONOLITHIC_REGION_THRESHOLD) {
     const userMessage = buildGenerationUserPrompt(regions, userPrompt, tokens, globalTheme, hasDrawingImage)
     const errors: Record<string, string> = {}
 
     for (const currentProvider of fallbacks) {
       try {
         const responseText = await runProvider(currentProvider, GENERATION_SYSTEM_PROMPT, userMessage, hasDrawingImage)
-        const code = extractReact(responseText)
+        let code = extractReact(responseText)
 
         if (!code || code.length < 20) throw new Error(`${currentProvider} returned empty response`)
         if (!code.includes('export default')) throw new Error('Generation truncated — output incomplete')
 
+        // Enforce the preset's banned classes (audit P3.2) — never trust
+        // prompt-only enforcement.
+        code = postProcessCode(code, tokens).code
+
+        setCachedGeneration(cacheKey, code, currentProvider)
         return { success: true, code, provider: currentProvider }
       } catch (err) {
         errors[currentProvider] = err instanceof Error ? err.message : String(err)
@@ -156,69 +180,40 @@ export async function generateCode(
   }
 
   // -------------------------------------------------------------------------
-  // Chunked generation path (> 12 regions — for genuinely large layouts)
-  // Phase 1: Shell (layout App() + placeholder tags)
-  // Phase 2: Component chunks (3 regions each, SERIAL to avoid a rate-limit burst)
-  // Phase 3: Assembly (merge imports + inject chunks)
+  // Chunked generation path (> 15 regions — for genuinely large layouts)
+  // Phase 1: Shell — built DETERMINISTICALLY in code from the drawing (no AI
+  //          call; audit P1.2). Grid spans/gaps mirror the prompt skeleton.
+  // Phase 2: Component chunks (3 regions each, SERIAL to avoid rate-limit
+  //          bursts). Chunks cover ALL regions (structural + decorative +
+  //          relational) because the shell references every <RegionX />.
+  // Phase 3: Assembly (merge imports + inject components into the shell).
   // -------------------------------------------------------------------------
   console.log(`[AI Gen] Using Chunked Generation for ${regions.length} regions`)
 
-  let shellCode = ''
-  let activeProvider = fallbacks[0]
-  const shellErrors: Record<string, string> = {}
+  const shellCode = buildShellTsx(regions, { root: tokens.rootClasses })
 
-  // Phase 1: Shell (gets the drawing image so full-page backgrounds
-  // and decorative placement can echo the actual strokes)
-  const shellMessage = buildShellUserPrompt(regions, userPrompt, tokens, globalTheme)
-  let shellSuccess = false
-
-  for (const currentProvider of fallbacks) {
-    try {
-      const responseText = await runProvider(currentProvider, CHUNKED_SHELL_SYSTEM_PROMPT, shellMessage, hasDrawingImage)
-      shellCode = extractReact(responseText)
-      if (!shellCode || shellCode.length < 20) throw new Error('Shell empty')
-      if (!shellCode.includes('export default')) throw new Error('Shell truncated')
-      activeProvider = currentProvider
-      shellSuccess = true
-      break
-    } catch (err) {
-      shellErrors[currentProvider] = err instanceof Error ? err.message : String(err)
-      console.warn(`[AI Gen Shell] ${currentProvider} failed:`, shellErrors[currentProvider])
-    }
-  }
-
-  if (!shellSuccess) {
-    return { success: false, error: `Shell generation failed — ${fallbacks.map(p => `${p}: ${humanizeProviderError(shellErrors[p])}`).join(' | ')}` }
-  }
-
-  // Phase 2: Chunks — structural regions only; decorative/relational shapes are
-  // handled by the shell via the skeleton instructions. Run SERIALLY (not
-  // Promise.all): a parallel burst of calls is exactly what trips free-tier
-  // rate limits. Try the provider that just built the shell FIRST, so we don't
-  // re-hit a provider that already rate-limited us.
   const CHUNK_SIZE = 3
-  const structuralRegions = regions.filter(r =>
-    !r.classificationTag ||
-    r.classificationTag === 'exact-placement' ||
-    r.classificationTag === 'approximate-area'
-  )
-  const chunkTargets = structuralRegions.length > 0 ? structuralRegions : regions
+  const chunkTargets = regions
 
   const chunks: Region[][] = []
   for (let i = 0; i < chunkTargets.length; i += CHUNK_SIZE) {
     chunks.push(chunkTargets.slice(i, i + CHUNK_SIZE))
   }
 
-  const chunkFallbacks: Array<'gemini' | 'groq' | 'nvidia'> =
+  const activeProvider = fallbacks[0]
+  // Try the user's selected provider first for every chunk, then fallbacks.
+  const chunkFallbacks: ProviderId[] =
     [activeProvider, ...fallbacks.filter(p => p !== activeProvider)]
 
   const generatedComponents: string[] = new Array(chunks.length).fill('')
   const allImports = new Set<string>()
+  let chunkFailures = 0
 
   for (let index = 0; index < chunks.length; index++) {
     const chunk = chunks[index]
     const chunkMessage = buildChunkUserPrompt(chunk, regions, userPrompt, tokens, globalTheme)
 
+    let chunkSucceeded = false
     for (const currentProvider of chunkFallbacks) {
       try {
         const responseText = await runProvider(currentProvider, CHUNKED_REGION_SYSTEM_PROMPT, chunkMessage)
@@ -232,14 +227,16 @@ export async function generateCode(
           l => !l.trim().startsWith('import ') && !l.trim().startsWith('export default')
         )
         generatedComponents[index] = componentLines.join('\n')
+        chunkSucceeded = true
         break
       } catch (err) {
         console.warn(`[AI Gen Chunk ${index}] ${currentProvider} failed:`, err)
       }
     }
+    if (!chunkSucceeded) chunkFailures++
   }
 
-  // Phase 3: Assembly
+  // Phase 3: Assembly — merge shell + component definitions + imports.
   const shellLines = shellCode.split('\n')
   const finalImports = new Set<string>()
   const nonImportLines: string[] = []
@@ -261,12 +258,25 @@ export async function generateCode(
     return { success: false, error: 'Could not assemble: shell is missing export default' }
   }
 
-  const assembledCode =
+  let assembledCode =
     mergedImports + '\n\n' +
     shellBody.substring(0, exportIndex) + '\n\n' +
     generatedComponents.filter(Boolean).join('\n\n') + '\n\n' +
     shellBody.substring(exportIndex)
 
+  assembledCode = postProcessCode(assembledCode, tokens).code
+
+  if (chunkFailures > 0) {
+    // Some regions have no component definition — the shell references
+    // <RegionX /> that would be undefined. Report instead of shipping a
+    // guaranteed runtime error.
+    return {
+      success: false,
+      error: `${chunkFailures} of ${chunks.length} component chunks failed on every provider — try again in a minute (free-tier rate limits) or reduce the number of regions`,
+    }
+  }
+
+  setCachedGeneration(cacheKey, assembledCode, activeProvider)
   return { success: true, code: assembledCode, provider: activeProvider }
 }
 
@@ -279,12 +289,13 @@ export async function regenerateRegion(
   userPrompt: string,
   existingCode: string,
   allRegions: Region[],
-  provider: 'gemini' | 'groq' | 'nvidia' = 'gemini',
+  provider: ProviderId = 'gemini',
   nvidiaModelId: string = DEFAULT_NVIDIA_MODEL
 ): Promise<GenerationResponse> {
+  const tokens = resolveDesignTokens(userPrompt)
   const userMessage = buildRegenerateUserPrompt(regionNumber, userPrompt, existingCode, allRegions)
 
-  const runProvider = async (p: 'gemini' | 'groq' | 'nvidia'): Promise<string> => {
+  const runProvider = async (p: ProviderId): Promise<string> => {
     const call = async (): Promise<string> => {
       if (p === 'nvidia') {
         return nvidiaGenerate(REGENERATE_REGION_SYSTEM_PROMPT, userMessage, nvidiaModelId)
@@ -303,22 +314,23 @@ export async function regenerateRegion(
     return withTimeout(call(), backstopMs, `${p} regeneration`)
   }
 
-  const fallbacks: Array<'gemini' | 'groq' | 'nvidia'> =
+  const fallbacks: ProviderId[] =
     provider === 'nvidia' ? ['nvidia', 'gemini', 'groq'] :
-    provider === 'groq' ? ['groq', 'gemini', 'nvidia'] :
-    ['gemini', 'groq', 'nvidia']
+    provider === 'groq' ? ['groq', 'gemini'] :
+    ['gemini', 'groq']
 
   let lastError = 'Unknown error'
 
   for (const currentProvider of fallbacks) {
     try {
       const responseText = await runProvider(currentProvider)
-      const code = extractReact(responseText)
+      let code = extractReact(responseText)
 
       if (!code || code.length < 20) {
         throw new Error(`${currentProvider} returned empty or too-short response`)
       }
 
+      code = postProcessCode(code, tokens).code
       return { success: true, code, provider: currentProvider }
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err)
