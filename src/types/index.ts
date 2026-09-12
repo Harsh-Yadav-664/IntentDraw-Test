@@ -26,6 +26,10 @@ export interface Region {
   // For decorative regions: 'region' = confined to where it was drawn /
   // behind the region it overlaps; 'full' = whole-page background.
   backgroundScope?: 'region' | 'full'
+  // User-side classification overrides (Controls panel). Respected by the
+  // generation route — a region with tagOverride is never re-classified.
+  tagOverride?: 'exact-placement' | 'approximate-area' | 'decorative' | 'relational'
+  backgroundScopeOverride?: 'region' | 'full'
   lockState: RegionLockState
   generatedCode: string | null
   createdAt: string
@@ -106,6 +110,8 @@ export interface GenerationResponse {
   success: boolean
   code?: string
   provider?: 'gemini' | 'groq' | 'nvidia'
+  /** True when served from the generation cache (no model call, no quota). */
+  cached?: boolean
   error?: string
 }
 

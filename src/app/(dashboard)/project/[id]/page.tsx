@@ -160,14 +160,20 @@ export default function ProjectPage({ params }: PageProps) {
         {/* View Mode Toggles */}
         <div className="absolute left-1/2 -translate-x-1/2 hidden md:flex items-center">
           <div className="glass-panel rounded-full p-1 flex items-center border-white/10 shadow-lg bg-black/40 backdrop-blur-md">
-            <button 
-              onClick={() => useCanvasStore.getState().setViewMode('canvas')} 
+            <button
+              onClick={() => useCanvasStore.getState().setViewMode('canvas')}
               className={`px-5 py-1.5 text-sm font-medium rounded-full transition-all duration-300 ${viewMode === 'canvas' ? 'bg-primary text-primary-foreground shadow-[0_0_15px_rgba(200,150,50,0.4)]' : 'hover:bg-white/10 text-muted-foreground'}`}
             >
               Design
             </button>
-            <button 
-              onClick={() => useCanvasStore.getState().setViewMode('preview')} 
+            <button
+              onClick={() => useCanvasStore.getState().setViewMode('split')}
+              className={`px-5 py-1.5 text-sm font-medium rounded-full transition-all duration-300 ${viewMode === 'split' ? 'bg-primary text-primary-foreground shadow-[0_0_15px_rgba(200,150,50,0.4)]' : 'hover:bg-white/10 text-muted-foreground'}`}
+            >
+              Split
+            </button>
+            <button
+              onClick={() => useCanvasStore.getState().setViewMode('preview')}
               className={`px-5 py-1.5 text-sm font-medium rounded-full transition-all duration-300 ${viewMode === 'preview' ? 'bg-primary text-primary-foreground shadow-[0_0_15px_rgba(200,150,50,0.4)]' : 'hover:bg-white/10 text-muted-foreground'}`}
             >
               Output

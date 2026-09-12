@@ -1,5 +1,6 @@
 import { wrapUserPrompt, sanitizeUserPrompt } from './prompt-rules'
 import { describeLayout } from './region-analyzer'
+import { buildInspirationSection } from './component-library'
 import type { Region } from '@/types'
 import type { DesignTokenSet } from './design-tokens'
 
@@ -7,73 +8,91 @@ import type { DesignTokenSet } from './design-tokens'
 // GENERATION SYSTEM PROMPT
 // =============================================================================
 
+const CRAFT_STANDARDS = `════════════════════════════════════════════
+CRAFT STANDARDS — NON-NEGOTIABLE
+════════════════════════════════════════════
+
+TYPOGRAPHY SCALE (this is what separates designed sites from AI output):
+  • Display headings (hero/section titles): text-6xl md:text-8xl (hero may go
+    md:text-[9vw]), font-black or font-extrabold, tracking-tighter,
+    leading-[0.9] to leading-[0.95]. NEVER text-3xl/text-4xl for a hero.
+  • Eyebrow/kicker labels: text-xs uppercase tracking-[0.2em]-[0.3em] font-medium.
+  • Body: text-base or text-lg, leading-relaxed, max-w-prose. Never justified.
+  • Weight contrast is mandatory: 800/900 display vs 400 body. Never uniform font-bold.
+  • When the preset calls for serif: font-serif display headings over sans body.
+
+REAL CONTENT (no filler, ever):
+  • Headlines: 3–5 words, concrete, evocative of the user's actual subject.
+    BAD: "Welcome to Our Website" / "Empower Your Workflow" / "The Future of X".
+    GOOD: "Clay, fired daily." / "Ship code while you sleep." / "Ramen, zero shortcuts."
+  • Subheads: 12–15 words, one idea.
+  • Buttons: verb-first, ≤3 words ("Start firing", "Book the studio", "See the menu").
+  • Use specific nouns from the prompt's domain (materials, places, dish names,
+    tools, prices). NEVER lorem ipsum. NEVER "Lorem". No "[placeholder]".
+
+STRUCTURE:
+  • Keep the provided skeleton's grid exactly — its spans encode drawn proportions.
+  • Inside each region, vary internal composition: asymmetric splits, offset
+    images, overlapping cards, numbered editorial rows, bento cells. NEVER the
+    default "icon-in-rounded-square + title + 2-line description ×3" pattern.
+  • Whitespace is a material: major sections get py-20/py-28, not py-8.
+  • One idea per section; hierarchy before decoration.
+
+QUALITY BAR (few-shot contrast — aim for the GOOD side):
+  GOOD: <h1 className="text-7xl md:text-[9vw] font-black tracking-tighter leading-[0.9]">Clay, fired daily.</h1>
+  BAD:  <h1 className="text-4xl font-bold">Welcome to Our Pottery Website</h1>
+  GOOD: <div className="grid md:grid-cols-12 gap-8"><div className="md:col-span-5 ..."/><div className="md:col-span-7 ..."/></div>
+  BAD:  <div className="flex gap-6"><Card/><Card/><Card/></div>
+  GOOD: <span className="text-xs uppercase tracking-[0.3em] text-neutral-500">The Studio — Est. 2019</span>
+  BAD:  <span className="text-sm text-gray-500">About Us</span>`
+
 export const GENERATION_SYSTEM_PROMPT = `You are IntentDraw's React generation engine.
-Your job: produce EXCEPTIONAL, visually crafted websites that look like a
-senior human designer built them — not an AI template machine.
+Your job: produce EXCEPTIONAL websites that look like a senior human designer
+shipped them — award-portfolio work, not an AI template machine.
 
 You will receive:
   1. A list of regions with positions (as % of the page), sizes, shape types,
      intent tags, and optional user intent notes
   2. A CONCRETE LAYOUT SKELETON that you MUST use
-  3. A user prompt describing what each region should contain and look like
-  4. Optional design tokens (hard style constraints)
+  3. Optional component inspiration (structural moves to learn from, not copy)
+  4. Hard design tokens (style constraints + banned classes)
+  5. A user prompt describing what each region should contain and look like
 
 ════════════════════════════════════════════
 UNDERSTANDING REGIONS & SPATIAL INTENT
 ════════════════════════════════════════════
 
 Regions are SPATIAL REFERENCES. Their shape type tells you geometry, NOT purpose.
-A circle is not "an animation." A wave is not automatically "a background."
 The user's prompt and each region's "intent" note define what it IS.
 
 Each region carries a classificationTag:
   - "exact-placement" / "approximate-area": structural — it appears in the
     LAYOUT SKELETON as a <RegionX /> placeholder you must fill.
-  - "decorative": NOT a content block. It is a stylistic element. Respect its
-    backgroundScope EXACTLY:
-      * backgroundScope "region": render it ONLY where it was drawn — as a local
-        background/decoration inside the region it overlaps, or confined to its
-        drawn position. NEVER stretch it across the whole page.
-      * backgroundScope "full": render it as the full-page background layer
-        behind all content.
-  - "relational": an arrow/connection. Express it as a directional cue,
-    connector line, or animated hint — not a content block.
+  - "decorative": NOT a content block. Respect its backgroundScope EXACTLY:
+      * "region": render ONLY where drawn — inside/behind the region it
+        overlaps, or confined to its drawn position. NEVER stretch it page-wide.
+      * "full": full-page background layer behind all content.
+  - "relational": an arrow/connection — express as a directional cue or
+    connector, not a content block.
 
-CRITICAL REQUIREMENT - THE SKELETON:
-You will be provided with a React/Tailwind LAYOUT SKELETON. This skeleton exactly
-mirrors the user's drawing. YOU MUST COPY THIS SKELETON EXACTLY.
-Do not invent your own layout or grid. Replace the <RegionX /> placeholders
-inside the skeleton with the actual components you build for those regions.
+CRITICAL REQUIREMENT — THE SKELETON:
+The layout skeleton exactly mirrors the user's drawing. YOU MUST COPY IT
+EXACTLY: same grid structure, same column spans, same order. Replace the
+<RegionX /> placeholders with the components you build.
 
-════════════════════════════════════════════
-VISUAL QUALITY — NON-NEGOTIABLE STANDARDS
-════════════════════════════════════════════
-
-STYLING (ANTI-GENERIC DESIGN PRINCIPLE):
-  Use Tailwind CSS utility classes exclusively.
-  NEVER default to generic "AI aesthetics" (e.g., soft rounded corners, pale gray backgrounds, generic subtle borders, standard Shadcn UI looks) unless the user specifically asks for a simple minimal look.
-  Instead, aim for PREMIUM, BOLD, and UNIQUE designs.
-  Use striking typography (tight tracking, large font sizes, contrasting weights).
-  Use dramatic spacing, bold background sections, sharp corners, or highly stylized dark modes.
-  Edit standard component aesthetics to match the user's explicit or implied intent.
-  Always use Lucide React icons for all iconography (import { IconName } from 'lucide-react').
-
-LAYOUT:
-  Build the layout STRICTLY from the provided skeleton.
-  Never default to: centered single-column, equal-card-grid, 4-column footer, unless the skeleton dictates it.
-  STRUCTURAL VARIETY: Avoid generic structural patterns. For example, if you generate a feature grid or list, NEVER use the standard 'icon-square + title + description x3 in a row' pattern unless forced by the skeleton. Vary structural presentation heavily using alternate layouts, asymmetric grids, staggered content, masonry, or numbered lists.
-  CONCISENESS: If the skeleton contains many regions (e.g. > 4), prioritize concise component implementations to avoid hitting token limits. Do not generate overly repetitive or unnecessarily verbose code.
+${CRAFT_STANDARDS}
 
 ════════════════════════════════════════════
 BANNED PATTERNS — NEVER PRODUCE THESE
 ════════════════════════════════════════════
 
-NEVER: Import or use ANY external libraries (e.g., framer-motion, next/image, next/link, react-router). You ONLY have access to 'react' and 'lucide-react'. If you need an image, use a standard <img> tag.
-NEVER: Bootstrap-style generic cards with heavy drop shadows.
-NEVER: placeholder images from picsum.photos. Use realistic Unsplash source URLs if an image is absolutely required, or better, use CSS gradients/Lucide icons.
-NEVER: Lorem ipsum — invent real-sounding placeholder content.
+NEVER: Import or use ANY external libraries (framer-motion, next/image, next/link, react-router…). You ONLY have 'react' and 'lucide-react'. Images use plain <img> tags.
+NEVER: placeholder images from picsum.photos. Use realistic Unsplash source URLs only if an image is truly required; prefer CSS gradients/SVG.
+NEVER: Lorem ipsum or generic filler copy.
 NEVER: Spinning loader rings as default state.
 NEVER: Output markdown backticks (\`\`\`).
+NEVER: The classes listed as BANNED in the design tokens — they will be
+auto-replaced with clashing styles if you use them.
 
 ════════════════════════════════════════════
 OUTPUT FORMAT
@@ -84,74 +103,51 @@ No markdown formatting. No code fences. No explanation before or after.
 Your response must start directly with imports and end with the default export.
 
 Structure:
+/* IntentDraw | Regions used: R1, R2... */
 import React, { useState } from 'react';
 import { Camera, ChevronRight } from 'lucide-react';
 
-// Use this comment block to denote regions so they can be regenerated later
+// Use this comment to denote regions so they can be regenerated later
 // <!-- LOCKED:R1 -->
 const Region1 = () => (
-  <div className="locked-r1">...</div>
+  <div className="...">...</div>
 )
 
 export default function App() {
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900">
-       {/* YOUR LAYOUT SKELETON GOES HERE */}
-       <Region1 />
-       {/* Other content */}
+    <div className="min-h-screen ...">
+      {/* THE LAYOUT SKELETON, with each <RegionX /> replaced by real components */}
+      <Region1 />
     </div>
   );
-}
-
-Top comment: /* IntentDraw | Regions used: R1, R2... */`
-
+}`
 
 // =============================================================================
 // CHUNKED GENERATION SYSTEM PROMPTS
 // =============================================================================
-
-export const CHUNKED_SHELL_SYSTEM_PROMPT = `You are IntentDraw's React layout generation engine.
-Your job is to generate ONLY the main layout shell.
-
-You will receive:
-  1. A list of regions
-  2. A CONCRETE LAYOUT SKELETON
-  3. The user prompt
-
-CRITICAL REQUIREMENTS:
-1. Generate the 'export default function App()' exactly as the layout skeleton dictates.
-2. For EVERY structural region in the list, use it inside the App component as <RegionX />.
-3. YOU MUST NOT define the RegionX components (e.g. do not write 'const Region1 = ...'). Another AI will generate those components.
-4. Decorative regions with backgroundScope "full" must be rendered by YOU as a full-page background layer behind everything. Decorative regions with backgroundScope "region" should be placed as absolutely-positioned layers inside the region they overlap (you may leave a placeholder comment for the component generator).
-
-Structure:
-import React, { useState } from 'react';
-
-export default function App() {
-  return (
-    <div className="min-h-screen bg-slate-50 text-slate-900">
-       {/* YOUR LAYOUT SKELETON GOES HERE */}
-       <Region1 />
-       <Region2 />
-    </div>
-  );
-}
-`
 
 export const CHUNKED_REGION_SYSTEM_PROMPT = `You are IntentDraw's React component generation engine.
 Your job is to generate ONLY the React components for a specific subset of regions.
 
 You will receive:
   1. The user prompt describing the website
-  2. The specific regions you need to build, with their positions, sizes, intent tags and notes
+  2. The specific regions you must build, with their positions, sizes, intent tags and notes
   3. The overall layout skeleton for context
 
 CRITICAL REQUIREMENTS:
-1. ONLY generate the React components for the requested regions.
-2. DO NOT generate the 'export default function App()' component.
-3. Follow the same extreme visual quality and anti-generic design rules (bold, unique, Tailwind).
-4. If you need icons, include 'import { IconName } from "lucide-react";' at the top.
-5. Respect each region's classificationTag and backgroundScope exactly as described in the region data.
+1. ONLY generate the React components for the requested regions — define each as
+   \`const RegionX = () => (...)\`. Do NOT generate the 'export default function App()'.
+2. Follow the same extreme visual quality rules: display-scale typography with
+   tight tracking, real concrete copy (3–5 word headlines, verb-first buttons),
+   asymmetric internal structure, generous section padding.
+3. Structural regions ("exact-placement"/"approximate-area") fill their grid cell —
+   no absolute positioning, the shell already places them.
+4. Decorative regions are self-positioning: return a component that renders an
+   absolutely-positioned stylistic layer (SVG/CSS) confined to its drawn area
+   (backgroundScope "region") or a fixed full-page background layer (scope "full").
+5. Relational regions render a subtle directional cue/connector, absolutely positioned.
+6. If you need icons, include 'import { IconName } from "lucide-react";' at the top.
+7. Respect the design tokens and their banned classes exactly.
 
 Structure:
 import { Camera, Star } from 'lucide-react';
@@ -164,8 +160,7 @@ const Region1 = () => (
 // <!-- CHUNK:R2 -->
 const Region2 = () => (
   <div className="...">...</div>
-)
-`
+)`
 
 // =============================================================================
 // REGENERATE REGION SYSTEM PROMPT
@@ -179,7 +174,9 @@ RULES:
 2. Find the React component for that region (look for comments or component names).
 3. ONLY modify that region's content and styling.
 4. Keep ALL other code byte-for-byte identical.
-5. Maintain the existing premium, bold, and unique Tailwind UI aesthetic. Avoid generic soft UI templates.
+5. Maintain the existing premium, bold design language: display-scale typography
+   with tight tracking, real concrete copy, asymmetric structure. No generic
+   soft-UI templates, no filler copy.
 6. The regenerated region must fit seamlessly with surrounding design.
 
 Locked regions (marked with // <!-- LOCKED:RX --> comments):
@@ -263,8 +260,7 @@ You MUST follow these concrete style tokens exactly. Do NOT use generic fallback
 - Shadows/Borders: ${tokens.shadowTreatment}
 - Special Instructions: ${tokens.specialInstructions || 'None'}
 
-CRITICAL - BANNED CLASSES:
-You are explicitly BANNED from using the following Tailwind classes anywhere in your output:
+CRITICAL - BANNED CLASSES (auto-enforced by post-processing — using them produces clashing styles):
 ${tokens.bannedClasses.join(', ')}`
 }
 
@@ -285,6 +281,10 @@ export function buildGenerationUserPrompt(
 
   // Add Design Tokens (Aesthetic Enforcement)
   sections.push(buildTokenSection(tokens))
+
+  // Component inspiration (audit P0.3) — structural few-shot, selected by prompt
+  const inspiration = buildInspirationSection(sanitized, regions)
+  if (inspiration) sections.push(inspiration)
 
   // Build normalized region data
   if (regions.length > 0) {
@@ -347,38 +347,6 @@ Return complete React TSX code with ONLY R${regionNumber} modified.`
   return wrapUserPrompt(prompt)
 }
 
-export function buildShellUserPrompt(
-  regions: Region[],
-  userPrompt: string,
-  tokens: DesignTokenSet,
-  globalTheme?: string
-): string {
-  const sanitized = sanitizeUserPrompt(userPrompt)
-
-  const sections: string[] = []
-
-  sections.push(buildTokenSection(tokens))
-
-  if (regions.length > 0) {
-    const { width: canvasWidth, height: canvasHeight } = getCanvasBounds(regions)
-
-    sections.push(`REGIONS (all positions/sizes are PERCENTAGES of the page, 0-100):
-${JSON.stringify(buildRegionData(regions), null, 2)}`)
-
-    sections.push(describeLayout(regions, canvasWidth, canvasHeight))
-  } else {
-    sections.push('NO REGIONS DRAWN — Create a complete website based only on the prompt.')
-  }
-
-  if (globalTheme) {
-    sections.push(`THEME: ${globalTheme}`)
-  }
-
-  sections.push(`USER PROMPT:\n${sanitized}`)
-
-  return wrapUserPrompt(sections.join('\n\n'))
-}
-
 export function buildChunkUserPrompt(
   regions: Region[],
   allRegions: Region[],
@@ -392,6 +360,9 @@ export function buildChunkUserPrompt(
 
   sections.push(buildTokenSection(tokens))
 
+  const inspiration = buildInspirationSection(sanitized, allRegions)
+  if (inspiration) sections.push(inspiration)
+
   // Full context: this chunk's regions with geometry + intent,
   // plus the overall skeleton so components know where they live.
   const { width: canvasWidth, height: canvasHeight } = getCanvasBounds(allRegions)
@@ -400,7 +371,7 @@ export function buildChunkUserPrompt(
     regions.some(r => `R${r.regionNumber}` === rd.label)
   )
 
-  sections.push(`YOUR REGIONS (positions/sizes are PERCENTAGES of the page, 0-100):
+  sections.push(`YOUR REGIONS — define a \`const RegionX = () => (...)\` for EACH of them (positions/sizes are PERCENTAGES of the page, 0-100):
 ${JSON.stringify(chunkData, null, 2)}`)
 
   sections.push(`OVERALL LAYOUT (for context — build ONLY your regions above):

@@ -3,7 +3,26 @@ import type { Region, RegionGeometry, CanvasTool } from '@/types'
 import { generateUUID } from '@/lib/utils'
 
 interface StageExporter {
-  toDataURL(config?: { pixelRatio?: number }): string
+  toDataURL(config?: {
+    pixelRatio?: number
+    mimeType?: string
+    quality?: number
+  }): string
+  width?: () => number
+  height?: () => number
+}
+
+/** Minimal shape of the Konva globals used by the export hack. */
+interface KonvaLike {
+  Rect: new (config: Record<string, unknown>) => {
+    destroy: () => void
+    moveToBottom: () => void
+  }
+}
+
+interface KonvaLayerLike {
+  add: (node: unknown) => void
+  draw: () => void
 }
 
 let _history: Region[][] = [[]]
@@ -32,6 +51,10 @@ interface CanvasStore {
   addRegion: (geometry: RegionGeometry) => void
   updateRegionGeometry: (id: string, updates: Partial<RegionGeometry>) => void
   updateRegionIntent: (id: string, intent: string) => void
+  updateRegionOverrides: (id: string, overrides: {
+    tagOverride?: Region['tagOverride']
+    backgroundScopeOverride?: Region['backgroundScopeOverride']
+  }) => void
   deleteRegions: (ids: string[]) => void
   clearRegions: () => void
   setRegions: (regions: Region[]) => void
@@ -43,7 +66,8 @@ interface CanvasStore {
   undo: () => void
   redo: () => void
 
-  exportToPng: () => string | null
+  /** Compressed JPEG export of the drawing (≤1024px wide) for vision calls. */
+  exportDrawingImage: () => string | null
   exportAsJson: () => string
   importFromJson: (json: string) => void
 }
@@ -162,6 +186,21 @@ export const useCanvasStore = create<CanvasStore>((set, get) => {
       }))
     },
 
+    updateRegionOverrides: (id, overrides) => {
+      set((state) => ({
+        regions: state.regions.map((r) =>
+          r.id === id
+            ? {
+                ...r,
+                tagOverride: 'tagOverride' in overrides ? overrides.tagOverride : r.tagOverride,
+                backgroundScopeOverride: 'backgroundScopeOverride' in overrides ? overrides.backgroundScopeOverride : r.backgroundScopeOverride,
+                updatedAt: new Date().toISOString(),
+              }
+            : r
+        ),
+      }))
+    },
+
     deleteRegions: (ids) => {
       const { selectedRegionIds, visibility } = get()
       const newVisibility = { ...visibility }
@@ -221,35 +260,54 @@ export const useCanvasStore = create<CanvasStore>((set, get) => {
       syncHistoryFlags()
     },
 
-    exportToPng: () => {
+    exportDrawingImage: () => {
       const stage = get()._stageInstance
       if (!stage) return null
-      
+
+      const width = stage.width?.() ?? 0
+      const height = stage.height?.() ?? 0
+
       // Temporarily add a background rect so the image isn't transparent
-      // We use any type here to bypass strict Konva types since we just need the layer
-      const layer = (stage as any).getLayers()[0]
-      if (layer && typeof window !== 'undefined' && (window as any).Konva) {
-        const bgRect = new (window as any).Konva.Rect({
+      // (JPEG has no alpha channel).
+      const stageAny = stage as unknown as { getLayers?: () => KonvaLayerLike[] }
+      const layer = stageAny.getLayers?.()[0]
+      let bgRect: { destroy: () => void; moveToBottom: () => void } | null = null
+      const Konva = (typeof window !== 'undefined' ? (window as unknown as { Konva?: KonvaLike }).Konva : undefined)
+      if (layer && Konva) {
+        bgRect = new Konva.Rect({
           x: 0,
           y: 0,
-          width: (stage as any).width(),
-          height: (stage as any).height(),
+          width,
+          height,
           fill: '#0A0A0B',
           listening: false,
         })
         layer.add(bgRect)
         bgRect.moveToBottom()
         layer.draw()
-        
-        const dataUrl = stage.toDataURL({ pixelRatio: 2 })
-        
-        bgRect.destroy()
-        layer.draw()
-        
-        return dataUrl
       }
-      
-      return stage.toDataURL({ pixelRatio: 2 })
+
+      try {
+        // Compressed export (audit P0.4): the old `pixelRatio: 2` PNG was
+        // 2–4 MB of base64 and blew free-tier token budgets. JPEG at 0.7
+        // quality, downscaled to ≤1024px wide (≤1280px tall), lands around
+        // 100–200 KB — ~90% smaller with no loss of layout information.
+        const scale = Math.min(
+          1,
+          1024 / Math.max(1, width),
+          1280 / Math.max(1, height)
+        )
+        return stage.toDataURL({
+          mimeType: 'image/jpeg',
+          quality: 0.7,
+          pixelRatio: scale,
+        })
+      } finally {
+        if (bgRect && layer) {
+          bgRect.destroy()
+          layer.draw()
+        }
+      }
     },
 
     exportAsJson: () => JSON.stringify(get().regions),

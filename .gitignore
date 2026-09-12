@@ -32,3 +32,6 @@ security.md
 
 # custom work suggestion
 AGENTS.md
+
+# pipeline test build output
+.pipeline-test-out/
